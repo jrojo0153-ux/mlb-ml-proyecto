@@ -2,12 +2,11 @@ name: MLB Machine Learning Pipeline
 
 on:
   schedule:
-    # Se ejecuta en punto cada hora desde las 17:00 UTC (11 AM CST) hasta las 23:00 UTC (5 PM CST)
+    # Se ejecuta en punto cada hora desde las 17:00 UTC (11 AM CST México) hasta las 23:00 UTC (5 PM CST)
     - cron: '0 17-23 * * *'
-    # Se ejecuta en punto cada hora desde las 00:00 UTC (6 PM CST) hasta las 05:00 UTC (11 PM CST)
+    # Se ejecuta en punto cada hora desde las 00:00 UTC (6 PM CST) hasta las 05:00 UTC (11 PM CST del mismo ciclo horario)
     - cron: '0 0-5 * * *'
-  workflow_dispatch: 
-    # Mantiene activo el botón manual en la interfaz web por si deseas forzar pruebas
+  workflow_dispatch:
 
 jobs:
   run-pipeline:
@@ -29,12 +28,15 @@ jobs:
         pip install requests pandas scikit-learn xgboost
 
     - name: Ejecutar script de Machine Learning
+      env:
+        TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       run: python ejecutar_pipeline.py
 
     - name: Guardar resultados en GitHub
       run: |
         git config --global user.name "github-actions[bot]"
-        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+        git config --global user.email "github-actions[bot]@://github.com"
         git add historial_proyecciones.json registro_rendimiento_mercados.csv dataset_mlb_mercados.csv || true
         git commit -m "data: ciclo horario de reentrenamiento, evaluacion y prediccion" || true
         git push
