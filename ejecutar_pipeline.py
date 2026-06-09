@@ -14,23 +14,30 @@ HISTORIAL_ACIERTOS_FALLOS = "registro_rendimiento_mercados.csv"
 DATASET_ENTRENAMIENTO = "dataset_mlb_mercados.csv"
 
 # --- 2. EVALUAR PREDICCIONES ANTERIORES (ACIERTOS Y FALLOS) ---
-url_mlb = f"https://mlb.com{datetime.now().strftime('%Y-%m-%d')}"
+url_mlb = f"https://statsapi.mlb.com/api/v1/schedule?date={datetime.now().strftime('%Y-%m-%d')}"
 juegos_hoy = {}
+response_mlb = {}  # Inicializar para evitar NameError
 
 try:
-    response_mlb = requests.get(url_mlb).json()
-    for date in response_mlb.get("dates", []):
-        for game in date.get("games", []):
-            g_id = str(game.get("gamePk"))
-            status = game.get("status", {}).get("abstractGameState") # "Live", "Final", "Preview"
-            if status == "Final":
-                home_score = game.get("teams", {}).get("home", {}).get("score", 0)
-                away_score = game.get("teams", {}).get("away", {}).get("score", 0)
-                juegos_hoy[g_id] = {
-                    "ganador": "HOME" if home_score > away_score else "AWAY",
-                    "total_carreras": home_score + away_score,
-                    "diferencia_carreras": abs(home_score - away_score)
-                }
+    response = requests.get(url_mlb)
+    response.raise_for_status()
+    data = response.json()
+    
+    for game in data:
+        g_id = str(game.get("gamePk"))
+        status = game.get("status", {}).get("abstractGameState")  # "Live", "Final", "Preview"
+        if status == "Final":
+            home_score = game.get("teams", {}).get("home", {}).get("score", 0)
+            away_score = game.get("teams", {}).get("away", {}).get("score", 0)
+            juegos_hoy[g_id] = {
+                "ganador": "HOME" if home_score > away_score else "AWAY",
+                "total_carreras": home_score + away_score,
+                "diferencia_carreras": abs(home_score - away_score)
+            }
+    
+    # Mantener estructura compatible con el resto del código
+    response_mlb = {"dates": [{"games": data}]}
+    
 except Exception as e:
     print(f"Error al consultar el calendario de MLB API: {e}")
 
