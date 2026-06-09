@@ -21,7 +21,7 @@ def obtener_datos_espn():
     Se conecta al marcador de ESPN para verificar las carreras anotadas en las primeras 
     5 entradas o el resultado final si el juego ya concluyó.
     """
-    url_scoreboard = f"https://espn.com{fecha_hoy_espn}"
+    url_scoreboard = f"https://www.espn.com/mlb/scoreboard?date={fecha_hoy_espn}"
     juegos_finalizados_5i = {}
     juegos_programados = []
     
@@ -31,9 +31,15 @@ def obtener_datos_espn():
             g_id = str(event.get("id"))
             status = event.get("status", {}).get("type", {}).get("state") # "pre", "in", "post"
             
-            competidores = event.get("competitions", [{}]).get("competitors", [])
-            home_box = next((c for c in competidores if c.get("homeAway") == "home"), {})
-            away_box = next((c for c in competidores if c.get("homeAway") == "away"), {})
+            competitions = event.get("competitions", [])
+            if not competitions:
+                continue
+                
+            competition = competitions[0]
+            competitors = competition.get("competitors", [])
+            
+            home_box = next((c for c in competitors if c.get("homeAway") == "home"), {})
+            away_box = next((c for c in competitors if c.get("homeAway") == "away"), {})
             
             home_name = home_box.get("team", {}).get("displayName")
             away_name = away_box.get("team", {}).get("displayName")
@@ -53,7 +59,8 @@ def obtener_datos_espn():
                         
                         if runs_home_5i != runs_away_5i: # Ignoramos empates momentáneamente para Moneyline
                             juegos_finalizados_5i[g_id] = "HOME" if runs_home_5i > runs_away_5i else "AWAY"
-                    except Exception:
+                    except Exception as e:
+                        print(f"Error procesando carreras de 5 entradas para juego {g_id}: {e}")
                         pass
                         
             if status == "pre":
@@ -222,3 +229,4 @@ except Exception as e:
     print(f"Error en el bloque de procesamiento y envío: {e}")
 
 with open(HISTORIAL_PROYECCIONES, "w") as f:
+    json.dump(proyecciones_actuales, f, indent=4)
