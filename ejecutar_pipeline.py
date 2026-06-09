@@ -6,172 +6,147 @@ from datetime import datetime
 from sklearn.model_selection import train_test_split
 from xgboost import XGBClassifier
 
-# Formatos de fecha para los endpoints de ESPN
 fecha_hoy_espn = datetime.now().strftime('%Y%m%d')
-print(f"=== Ciclo Pro: ESPN + The Odds API (Mercado: 5-Innings) - {datetime.now().strftime('%H:%M')} ===")
+print(f"=== Ciclo Pro: Totales MLB (Over/Under) - {datetime.now().strftime('%H:%M')} ===")
 
 # --- ARCHIVOS LOCALES ---
-HISTORIAL_PROYECCIONES = "historial_proyecciones.json"
-HISTORIAL_ACIERTOS_FALLOS = "registro_rendimiento_mercados.csv"
-DATASET_ENTRENAMIENTO = "dataset_mlb_mercados.csv"
+HISTORIAL_PROYECCIONES = "historial_totales.json"
+HISTORIAL_ACIERTOS_FALLOS = "registro_totales_mercados.csv"
+DATASET_ENTRENAMIENTO = "dataset_mlb_totales.csv"
 
-# --- 1. EXTRAER ESTADÍSTICAS Y MARCADORES EN VIVO DESDE ESPN ---
+# --- 1. EXTRAER MARCADORES DE TOTALES DESDE ESPN ---
 def obtener_datos_espn():
-    """
-    Se conecta al marcador de ESPN para verificar las carreras anotadas en las primeras 
-    5 entradas o el resultado final si el juego ya concluyó.
-    """
-    url_scoreboard = f"https://www.espn.com/mlb/scoreboard?date={fecha_hoy_espn}"
-    juegos_finalizados_5i = {}
+    url_scoreboard = f"https://espn.com{fecha_hoy_espn}"
+    juegos_finalizados = {}
     juegos_programados = []
     
     try:
         res = requests.get(url_scoreboard).json()
         for event in res.get("events", []):
             g_id = str(event.get("id"))
-            status = event.get("status", {}).get("type", {}).get("state") # "pre", "in", "post"
+            status = event.get("status", {}).get("type", {}).get("state")
             
-            competitions = event.get("competitions", [])
-            if not competitions:
-                continue
+            competidores = event.get("competitions", [{}]).get("competitors", [])
+            home_name = next((c for c in competidores if c.get("homeAway") == "home"), {}).get("team", {}).get("displayName")
+            away_name = next((c for c in competidores if c.get("homeAway") == "away"), {}).get("team", {}).get("displayName")
+            
+            if status == "post":
+                home_score = int(next((c for c in competidores if c.get("homeAway") == "home"), {}).get("score", 0))
+                away_score = int(next((c for c in competidores if c.get("homeAway") == "away"), {}).get("score", 0))
+                # Guardamos la suma total de carreras reales del encuentro
+                juegos_finalizados[g_id] = home_score + away_score
                 
-            competition = competitions[0]
-            competitors = competition.get("competitors", [])
-            
-            home_box = next((c for c in competitors if c.get("homeAway") == "home"), {})
-            away_box = next((c for c in competitors if c.get("homeAway") == "away"), {})
-            
-            home_name = home_box.get("team", {}).get("displayName")
-            away_name = away_box.get("team", {}).get("displayName")
-            
-            # Verificar si ya pasaron las primeras 5 entradas (analizando las líneas por entrada de ESPN)
-            # Si el juego ya está en progreso avanzado ("in") o finalizado ("post")
-            if status in ["in", "post"]:
-                # ESPN desglosa las carreras por entrada en 'linescores'
-                home_linescore = home_box.get("linescores", [])
-                away_linescore = away_box.get("linescores", [])
-                
-                # Necesitamos que se hayan jugado al menos 5 entradas
-                if len(home_linescore) >= 5 and len(away_linescore) >= 5:
-                    try:
-                        runs_home_5i = sum(int(home_linescore[i].get("value", 0)) for i in range(5))
-                        runs_away_5i = sum(int(away_linescore[i].get("value", 0)) for i in range(5))
-                        
-                        if runs_home_5i != runs_away_5i: # Ignoramos empates momentáneamente para Moneyline
-                            juegos_finalizados_5i[g_id] = "HOME" if runs_home_5i > runs_away_5i else "AWAY"
-                    except Exception as e:
-                        print(f"Error procesando carreras de 5 entradas para juego {g_id}: {e}")
-                        pass
-                        
-            if status == "pre":
+            elif status == "pre":
                 juegos_programados.append({
                     "game_id": g_id,
                     "home_team": home_name,
                     "away_team": away_name
                 })
     except Exception as e:
-        print(f"Error consultando el marcador de ESPN: {e}")
-        
-    return juegos_finalizados_5i, juegos_programados
+        print(f"Error en scoreboard de ESPN: {e}")
+    return juegos_finalizados, juegos_programados
 
-# Ejecutar consulta a ESPN
-juegos_finalizados_5i, juegos_programados = obtener_datos_espn()
+juegos_finalizados, juegos_programados = obtener_datos_espn()
 
-# --- 2. EXTRAER CUOTAS REALES EN VIVO PARA 5-INNINGS (THE ODDS API) ---
-def obtener_cuotas_reales_5i():
-    """Descarga cuotas vigentes de Moneyline específicas para las primeras 5 entradas (h2h_1st_5_innings)"""
+# --- 2. EXTRAER CUOTAS DE OVER/UNDER EN VIVO (THE ODDS API) ---
+def obtener_lineas_totales():
     api_key = os.environ.get("ODDS_API_KEY")
-    odds_map = {}
+    totals_map = {}
     if not api_key:
         print("Falta ODDS_API_KEY en las variables de entorno.")
-        return odds_map
+        return totals_map
         
-    # Usamos el mercado específico 'h2h_1st_5_innings' provisto por la API
-    url = f"https://the-odds-api.com{api_key}&regions=us&markets=h2h_1st_5_innings&oddsFormat=decimal"
+    url = f"https://the-odds-api.com{api_key}&regions=us&markets=totals&oddsFormat=decimal"
     try:
         res = requests.get(url).json()
         for match in res:
             home = match.get("home_team")
-            away = match.get("away_team")
             bookmakers = match.get("bookmakers", [])
             if bookmakers:
-                # Buscamos el mercado en el primer operador de apuestas que lo ofrezca
                 markets = bookmakers[0].get("markets", [])
-                market_5i = next((m for m in markets if m.get("key") == "h2h_1st_5_innings"), None)
+                market_totals = next((m for m in markets if m.get("key") == "totals"), None)
                 
-                if market_5i:
-                    outcomes = market_5i.get("outcomes", [])
-                    cuota_home = next((o["price"] for o in outcomes if o["name"] == home), 1.90)
-                    cuota_away = next((o["price"] for o in outcomes if o["name"] == away), 1.90)
+                if market_totals:
+                    outcomes = market_totals.get("outcomes", [])
+                    # Las líneas de Over y Under comparten el mismo punto numérico (ej. 8.5 carreras)
+                    linea_puntos = float(outcomes[0].get("point", 8.5))
                     
-                    odds_map[home] = {"cuota": cuota_home, "rival": away, "rol": "HOME"}
-                    odds_map[away] = {"cuota": cuota_away, "rival": home, "rol": "AWAY"}
+                    cuota_over = next((o["price"] for o in outcomes if o["name"] == "Over"), 1.90)
+                    cuota_under = next((o["price"] for o in outcomes if o["name"] == "Under"), 1.90)
+                    
+                    totals_map[home] = {
+                        "linea": linea_puntos,
+                        "cuota_over": cuota_over,
+                        "cuota_under": cuota_under
+                    }
     except Exception as e:
-        print(f"Error procesando las cuotas de 5 Innings de The Odds API: {e}")
-    return odds_map
+        print(f"Error procesando líneas de totales: {e}")
+    return totals_map
 
-cuotas_vivas = obtener_cuotas_reales_5i()
+cuotas_totales = obtener_lineas_totales()
 
-# --- 3. EVALUACIÓN CONTINUA DE LAS 5 ENTRADAS (FEEDBACK LOOP) ---
-if os.path.exists(HISTORIAL_PROYECCIONES) and juegos_finalizados_5i:
+# --- 3. EVALUACIÓN Y REENTRENAMIENTO (FEEDBACK LOOP DE TOTALES) ---
+if os.path.exists(HISTORIAL_PROYECCIONES) and juegos_finalizados:
     with open(HISTORIAL_PROYECCIONES, "r") as f:
         predicciones_guardadas = json.load(f)
     
     nuevos_logs = []
     for g_id, pred in predicciones_guardadas.items():
-        if g_id in juegos_finalizados_5i and not pred.get("evaluado", False):
-            ganador_real_5i = juegos_finalizados_5i[g_id]
-            acierto = 1 if pred["prediccion_ganador"] == ganador_real_5i else 0
+        if g_id in juegos_finalizados and not pred.get("evaluado", False):
+            total_real_carreras = juegos_finalizados[g_id]
+            linea_proyectada = float(pred["linea_casino"])
+            
+            # Verificar si se cumplió el Over o el Under
+            resultado_real_string = "OVER" if total_real_carreras > linea_proyectada else "UNDER"
+            if total_real_carreras == linea_proyectada: resultado_real_string = "PUSH" # Empate con la casa
+            
+            acierto = 1 if pred["prediccion_tipo"] == resultado_real_string else 0
             
             nuevos_logs.append({
                 "fecha_hora": datetime.now().strftime("%Y-%m-%d %H:%M"),
                 "game_id": g_id,
-                "home_team": pred["home_team"],
-                "away_team": pred["away_team"],
-                "prediccion": pred["prediccion_ganador"],
-                "real_5i": ganador_real_5i,
+                "linea_casino": linea_proyectada,
+                "total_real": total_real_carreras,
+                "prediccion": pred["prediccion_tipo"],
                 "resultado_evaluacion": acierto
             })
             pred["evaluado"] = True
             
-            # Registrar experiencia en el Dataset enfocado en 5 Innings
             if os.path.exists(DATASET_ENTRENAMIENTO):
                 df_data = pd.read_csv(DATASET_ENTRENAMIENTO)
                 nueva_linea = pd.DataFrame([{
+                    "linea_puntos": linea_proyectada,
                     "cuota_movimiento": float(pred.get("meta_cuota", 1.90)),
-                    "resultado_real": 1 if ganador_real_5i == "HOME" else 0
+                    "resultado_binario": 1 if resultado_real_string == "OVER" else 0
                 }])
                 pd.concat([df_data, nueva_linea], ignore_index=True).to_csv(DATASET_ENTRENAMIENTO, index=False)
 
     if nuevos_logs:
-        df_log = pd.DataFrame(nuevos_logs)
-        df_log.to_csv(HISTORIAL_ACIERTOS_FALLOS, mode='a', header=not os.path.exists(HISTORIAL_ACIERTOS_FALLOS), index=False)
-        
+        pd.DataFrame(nuevos_logs).to_csv(HISTORIAL_ACIERTOS_FALLOS, mode='a', header=not os.path.exists(HISTORIAL_ACIERTOS_FALLOS), index=False)
     with open(HISTORIAL_PROYECCIONES, "w") as f:
         json.dump(predicciones_guardadas, f, indent=4)
 
-# --- 4. MODELO DE CLASIFICACIÓN MACHINE LEARNING ---
+# --- 4. ENTRENAMIENTO DEL MODELO XGBOOST PARA TOTALES ---
 if not os.path.exists(DATASET_ENTRENAMIENTO):
-    df_init = pd.DataFrame(columns=["cuota_movimiento", "resultado_real"])
-    df_init.loc[0] = [1.85, 1]
-    df_init.loc[1] = [2.20, 0]
-    df_init.loc[2] = [1.95, 1]
+    df_init = pd.DataFrame(columns=["linea_puntos", "cuota_movimiento", "resultado_binario"])
+    df_init.loc = [8.5, 1.90, 1]
+    df_init.loc = [7.5, 1.85, 0]
+    df_init.loc = [9.0, 1.95, 1]
     df_init.to_csv(DATASET_ENTRENAMIENTO, index=False)
 
 df_training = pd.read_csv(DATASET_ENTRENAMIENTO)
-X = df_training[["cuota_movimiento"]]
-y = df_training["resultado_real"]
+X = df_training[["linea_puntos", "cuota_movimiento"]]
+y = df_training["resultado_binario"]
 
 modelo = XGBClassifier(n_estimators=100, learning_rate=0.05, max_depth=3, eval_metric="logloss")
 modelo.fit(X, y)
 
-# --- 5. DETECTAR VALOR Y NOTIFICAR A TELEGRAM ---
+# --- 5. DETECTAR JUEGOS QUE CUMPLEN EN TOTALES Y ENVIAR ALERTA ---
 def enviar_telegram(msg):
     t_tok = os.environ.get("TELEGRAM_TOKEN")
     t_id = os.environ.get("TELEGRAM_CHAT_ID")
     if t_tok and t_id:
-        url = f"https://telegram.org{t_tok}/sendMessage"
-        requests.post(url, json={"chat_id": t_id, "text": msg, "parse_mode": "Markdown"})
+        requests.post(f"https://telegram.org{t_tok}/sendMessage", json={"chat_id": t_id, "text": msg, "parse_mode": "Markdown"})
 
 proyecciones_actuales = {}
 if os.path.exists(HISTORIAL_PROYECCIONES):
@@ -179,54 +154,56 @@ if os.path.exists(HISTORIAL_PROYECCIONES):
         try: proyecciones_actuales = json.load(f)
         except: proyecciones_actuales = {}
 
-try:
-    for juego in juegos_programados:
-        g_id = juego["game_id"]
+for juego in juegos_programados:
+    g_id = juego["game_id"]
+    if g_id in proyecciones_actuales:
+        continue # Filtro de duplicación activado
         
-        # Filtro de duplicados
-        if g_id in proyecciones_actuales:
-            continue
-            
-        home_team = juego["home_team"]
-        away_team = juego["away_team"]
+    home_team = juego["home_team"]
+    away_team = juego["away_team"]
+    
+    # Obtener línea de carreras real provista por el casino
+    linea_info = cuotas_totales.get(home_team, {"linea": 8.5, "cuota_over": 1.90, "cuota_under": 1.90})
+    linea_actual = linea_info["linea"]
+    
+    # Evaluar probabilidad de Altas (Over)
+    input_over = pd.DataFrame([[linea_actual, linea_info["cuota_over"]]], columns=["linea_puntos", "cuota_movimiento"])
+    prob_over = float(modelo.predict_proba(input_over)[1])
+    prob_casino_over = 1 / linea_info["cuota_over"]
+    
+    # Evaluar probabilidad de Bajas (Under)
+    prob_under = 1 - prob_over
+    prob_casino_under = 1 / linea_info["cuota_under"]
+    
+    prediccion_tipo = "OVER" if prob_over > prob_under else "UNDER"
+    prob_seleccionada = prob_over if prediccion_tipo == "OVER" else prob_under
+    prob_casino_seleccionada = prob_casino_over if prediccion_tipo == "OVER" else prob_casino_under
+    cuota_seleccionada = linea_info["cuota_over"] if prediccion_tipo == "OVER" else linea_info["cuota_under"]
+    
+    # El juego "CUMPLE" si la ventaja contra la casa es mayor al 3%
+    if prob_seleccionada > (prob_casino_seleccionada + 0.03):
+        ventaja = prob_seleccionada - prob_casino_seleccionada
         
-        # Si no encontramos cuota específica de 5 innings para ese equipo, usamos una cuota base por defecto
-        cuota_info = cuotas_vivas.get(home_team, {"cuota": 1.85})
-        cuota_mercado = cuota_info["cuota"]
+        mensaje = (
+            f"📈 *ALERTA DE TOTALES DETECTADA (O/U)* 📈\n\n"
+            f"🏟 *Partido:* {away_team} vs {home_team}\n"
+            f"📊 *Línea de Carreras:* {linea_actual} goles/carreras\n"
+            f"🎯 *Pick:* {prediccion_tipo} (Altas/Bajas)\n"
+            f"🎰 *Cuota Real:* {cuota_seleccionada:.2f}\n"
+            f"📈 *Ventaja contra la Casa:* +{ventaja:.1%}\n"
+            f"⏰ *ID de Juego ESPN:* {g_id}"
+        )
+        enviar_telegram(mensaje)
         
-        input_live = pd.DataFrame([[cuota_mercado]], columns=["cuota_movimiento"])
-        
-        pred_clase = int(modelo.predict(input_live)[0])
-        prob_ia = float(modelo.predict_proba(input_live)[0][pred_clase])
-        prob_casino = 1 / cuota_mercado
-        
-        alerta_enviada = False
-        # Filtro de ventaja matemática estricto (+3%)
-        if prob_ia > (prob_casino + 0.03):
-            ventaja = prob_ia - prob_casino
-            pick = home_team if pred_clase == 1 else away_team
-            
-            mensaje = (
-                f"🛡 *VALOR DETECTADA: 1AS 5 ENTRADAS (5I)* 🛡\n\n"
-                f"🏟 *Partido:* {away_team} vs {home_team}\n"
-                f"🎯 *Pick Recomendado:* {pick} (Línea de 5 Innings)\n"
-                f"🎰 *Cuota Casino (5I):* {cuota_mercado:.2f}\n"
-                f"📈 *Ventaja contra la Casa:* +{ventaja:.1%}\n"
-                f"⏰ *ID de Juego ESPN:* {g_id}"
-            )
-            enviar_telegram(mensaje)
-            alerta_enviada = True
-        
-        proyecciones_actuales[g_id] = {
-            "home_team": home_team,
-            "away_team": away_team,
-            "prediccion_ganador": "HOME" if pred_clase == 1 else "AWAY",
-            "meta_cuota": cuota_mercado,
-            "alerta_emitida": alerta_enviada,
-            "evaluado": False
-        }
-except Exception as e:
-    print(f"Error en el bloque de procesamiento y envío: {e}")
+    proyecciones_actuales[g_id] = {
+        "home_team": home_team,
+        "away_team": away_team,
+        "linea_casino": linea_actual,
+        "prediccion_tipo": prediccion_tipo,
+        "meta_cuota": cuota_seleccionada,
+        "evaluado": False
+    }
 
 with open(HISTORIAL_PROYECCIONES, "w") as f:
     json.dump(proyecciones_actuales, f, indent=4)
+print("Análisis de totales de la jornada concluido con éxito.")
